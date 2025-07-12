@@ -53,6 +53,27 @@
                                         <i class="fas fa-network-wired"></i> Tes Koneksi
                                     </button>
                                 </li>
+                                {{-- <li>
+                                    <button class="dropdown-item testVlanBtn" data-id="{{ $olt->id }}">
+                                        <i class="fas fa-bug"></i> Test VLAN Command
+                                    </button>
+                                </li> --}}
+                                <li><hr class="dropdown-divider"></li>
+                                <li>
+                                    <button class="dropdown-item syncVlanBtn" data-id="{{ $olt->id }}">
+                                        <i class="fas fa-sync-alt"></i> Sync VLAN Profiles
+                                    </button>
+                                </li>
+                                <li>
+                                    <button class="dropdown-item viewVlanBtn" data-id="{{ $olt->id }}" data-bs-toggle="modal" data-bs-target="#modalVlanProfiles">
+                                        <i class="fas fa-list"></i> Lihat VLAN Profiles
+                                    </button>
+                                </li>
+                                {{-- <li>
+                                    <button class="dropdown-item debugVlanBtn" data-id="{{ $olt->id }}">
+                                        <i class="fas fa-code"></i> Debug VLAN Data
+                                    </button>
+                                </li> --}}
                                 <li><hr class="dropdown-divider"></li>
                                 <li>
                                     <form action="{{ route('olts.destroy', $olt) }}" method="POST" class="deleteForm">
@@ -239,6 +260,28 @@
     </div>
   </div>
 </div>
+<!-- Modal View VLAN Profiles -->
+<div class="modal fade" id="modalVlanProfiles" tabindex="-1" aria-labelledby="modalVlanProfilesLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="modalVlanProfilesLabel">VLAN Profiles</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="vlanProfilesBody">
+        <div class="text-center">
+          <div class="spinner-border" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+          <p class="mt-2">Memuat VLAN profiles...</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Tutup</button>
+      </div>
+    </div>
+  </div>
+</div>
 @push('scripts')
 <script>
 $(function() {
@@ -283,6 +326,112 @@ $(function() {
 
     // Refresh data every 30 seconds
     setInterval(loadOltInfo, 30000);
+
+    // Test VLAN Command
+    $(document).on('click', '.testVlanBtn', function() {
+        var id = $(this).data('id');
+        Swal.fire({
+            title: 'Test VLAN Command',
+            text: 'Sedang test koneksi dan command...',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+                $.get('/olts/' + id + '/test-vlan', function(res) {
+                    Swal.close();
+                    Swal.fire({
+                        icon: res.success ? 'success' : 'error',
+                        title: res.success ? 'Test Berhasil' : 'Test Gagal',
+                        html: res.message,
+                        width: 600
+                    });
+                }).fail(function(xhr) {
+                    Swal.close();
+                    Swal.fire('Gagal', 'Test command gagal dijalankan', 'error');
+                });
+            }
+        });
+    });
+
+    // Sync VLAN Profiles
+    $(document).on('click', '.syncVlanBtn', function() {
+        var id = $(this).data('id');
+        Swal.fire({
+            title: 'Sync VLAN Profiles',
+            text: 'Sedang mengambil VLAN profiles dari OLT...',
+            allowOutsideClick: false,
+            showConfirmButton: false,
+            didOpen: () => {
+                Swal.showLoading();
+                
+                // Set timeout untuk request
+                var xhr = $.post('/olts/' + id + '/sync-vlans', {
+                    _token: '{{ csrf_token() }}'
+                }, function(res) {
+                    Swal.close();
+                    Swal.fire({
+                        icon: res.success ? 'success' : 'error',
+                        title: res.success ? 'Berhasil' : 'Gagal',
+                        html: res.message,
+                        timer: res.success ? 3000 : null
+                    });
+                }).fail(function(xhr, status, error) {
+                    Swal.close();
+                    if (status === 'timeout') {
+                        Swal.fire('Timeout', 'Request timeout. Coba periksa koneksi ke OLT.', 'warning');
+                    } else {
+                        Swal.fire('Gagal', 'Sync VLAN profiles gagal: ' + error, 'error');
+                    }
+                });
+                
+                // Set timeout 30 detik
+                xhr.timeout = 30000;
+            }
+        });
+    });
+
+    // Debug VLAN Data
+    $(document).on('click', '.debugVlanBtn', function() {
+        var id = $(this).data('id');
+        $.get('/olts/' + id + '/vlan-profiles', function(res) {
+            Swal.fire({
+                title: 'Debug VLAN Data',
+                html: '<pre style="text-align: left; font-size: 12px;">' + JSON.stringify(res, null, 2) + '</pre>',
+                width: 800,
+                showCloseButton: true
+            });
+        }).fail(function(xhr) {
+            Swal.fire('Debug Error', 'Gagal mengambil data debug', 'error');
+        });
+    });
+
+    // View VLAN Profiles
+    $(document).on('click', '.viewVlanBtn', function() {
+        var id = $(this).data('id');
+        $('#vlanProfilesBody').html(`
+            <div class="text-center">
+                <div class="spinner-border" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2">Memuat VLAN profiles...</p>
+            </div>
+        `);
+        
+        // Debug: Log the request
+        console.log('Loading VLAN profiles for OLT ID:', id);
+        
+        $.get('/olts/' + id + '/vlan-profiles-view', function(data) {
+            console.log('VLAN profiles loaded successfully');
+            $('#vlanProfilesBody').html(data);
+        }).fail(function(xhr, status, error) {
+            console.log('Failed to load VLAN profiles:', status, error);
+            $('#vlanProfilesBody').html(`
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-triangle"></i> 
+                    Gagal memuat VLAN profiles: ` + error + `
+                </div>
+            `);
+        });
+    });
 
     // Tes koneksi OLT
     $(document).on('click', '.testOltBtn', function() {
@@ -471,6 +620,25 @@ $(function() {
 .dropdown-item.text-danger:hover {
     background-color: #dc3545;
     color: white !important;
+}
+
+/* VLAN styling */
+.vlan-list {
+    max-height: 100px;
+    overflow-y: auto;
+}
+
+.vlan-list .badge {
+    font-size: 0.75rem;
+}
+
+.modal-xl .table {
+    font-size: 0.875rem;
+}
+
+.modal-xl .table th {
+    background-color: #f8f9fa;
+    font-weight: 600;
 }
 </style>
 @endpush

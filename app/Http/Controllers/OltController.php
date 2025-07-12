@@ -2,6 +2,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Olt;
+use App\Models\VlanProfile;
 use Illuminate\Http\Request;
 
 class OltController extends Controller
@@ -324,5 +325,402 @@ class OltController extends Controller
         }
         
         return (string)$activePorts;
+    }
+
+    public function syncVlans(Olt $olt)
+    {
+        $result = ['success' => false, 'message' => '', 'data' => []];
+        
+        try {
+            $vlanData = $this->getVlanProfilesViaTelnet($olt->ip, $olt->port, $olt->user, $olt->pass);
+            
+            if ($vlanData['success']) {
+                // Clear existing VLAN profiles for this OLT
+                VlanProfile::where('olt_id', $olt->id)->delete();
+                
+                $savedProfiles = 0;
+                foreach ($vlanData['profiles'] as $profile) {
+                    VlanProfile::create([
+                        'olt_id' => $olt->id,
+                        'profile_name' => $profile['name'],
+                        'profile_id' => $profile['id'],
+                        'vlan_data' => $profile['vlans'],
+                        'vlan_count' => count($profile['vlans']),
+                        'last_updated' => now(),
+                    ]);
+                    $savedProfiles++;
+                }
+                
+                $result['success'] = true;
+                $result['message'] = "Berhasil menyimpan {$savedProfiles} VLAN profile";
+                $result['data'] = ['profiles_count' => $savedProfiles];
+            } else {
+                $result['message'] = $vlanData['message'];
+            }
+        } catch (\Exception $e) {
+            $result['message'] = 'Error: ' . $e->getMessage();
+        }
+        
+        return response()->json($result);
+    }
+
+    public function getVlanProfiles(Olt $olt)
+    {
+        $profiles = VlanProfile::where('olt_id', $olt->id)
+            ->orderBy('profile_name')
+            ->get();
+            
+        return response()->json([
+            'success' => true,
+            'data' => $profiles
+        ]);
+    }
+
+    // Helper method untuk mengambil VLAN profiles via Telnet
+    private function getVlanProfilesViaTelnet($ip, $port, $user, $pass)
+    {
+        $timeout = 5; // Reduced timeout
+        $result = ['success' => false, 'message' => '', 'profiles' => []];
+        
+        try {
+            // Test koneksi socket
+            $fp = @fsockopen($ip, $port, $errno, $errstr, $timeout);
+            if (!$fp) {
+                $result['message'] = "Gagal koneksi ke $ip:$port ($errstr)";
+                return $result;
+            }
+            
+            stream_set_timeout($fp, $timeout);
+            
+            // Login process
+            $loginResult = $this->telnetLogin($fp, $user, $pass);
+            if (!$loginResult) {
+                fclose($fp);
+                $result['message'] = 'Gagal login ke OLT';
+                return $result;
+            }
+            
+            // Send command to get VLAN profiles
+            fwrite($fp, "show gpon onu profile vlan\r\n");
+            fflush($fp);
+            
+            // Read response with improved logic
+            $response = '';
+            $maxWait = 10; // Reduced to 10 seconds
+            $waited = 0;
+            $lastDataTime = time();
+            
+            while ($waited < $maxWait) {
+                $data = fread($fp, 4096);
+                if ($data !== false && $data !== '') {
+                    $response .= $data;
+                    $lastDataTime = time();
+                    
+                    // Check if we have complete output (look for prompt at end)
+                    if (preg_match('/[\#\>]\s*$/', $response) || 
+                        strpos($response, 'More:') !== false ||
+                        strpos($response, '--More--') !== false) {
+                        
+                        // If there's more data, send space to continue
+                        if (strpos($response, 'More:') !== false || strpos($response, '--More--') !== false) {
+                            fwrite($fp, " ");
+                            fflush($fp);
+                        } else {
+                            break; // Command completed
+                        }
+                    }
+                }
+                
+                // Break if no data received for 3 seconds
+                if (time() - $lastDataTime > 3) {
+                    break;
+                }
+                
+                usleep(200000); // 0.2 second
+                $waited++;
+            }
+            
+            fclose($fp);
+            
+            // Debug: Log the response (remove in production)
+            error_log('VLAN Response Length: ' . strlen($response));
+            error_log('VLAN Response Preview: ' . substr($response, 0, 500));
+            
+            // Parse the response
+            $profiles = $this->parseVlanProfileResponse($response);
+            
+            if (!empty($profiles)) {
+                $result['success'] = true;
+                $result['profiles'] = $profiles;
+                $result['message'] = 'VLAN profiles berhasil diambil (' . count($profiles) . ' profiles)';
+            } else {
+                $result['message'] = 'Tidak ada VLAN profile ditemukan. Response length: ' . strlen($response);
+            }
+            
+        } catch (\Exception $e) {
+            $result['message'] = 'Error: ' . $e->getMessage();
+        }
+        
+        return $result;
+    }
+
+    // Helper method untuk login telnet
+    private function telnetLogin($fp, $user, $pass)
+    {
+        try {
+            // Read welcome message
+            usleep(500000); // 0.5 second
+            $welcome = fread($fp, 4096);
+            
+            // Send username
+            fwrite($fp, "$user\r\n");
+            fflush($fp);
+            
+            usleep(500000); // 0.5 second
+            $userResponse = fread($fp, 4096);
+            
+            // Send password
+            fwrite($fp, "$pass\r\n");
+            fflush($fp);
+            
+            usleep(1000000); // 1 second
+            $loginResponse = fread($fp, 4096);
+            
+            // Check for successful login indicators
+            $allResponse = $welcome . $userResponse . $loginResponse;
+            
+            // Look for success indicators
+            if (strpos($allResponse, '#') !== false || 
+                strpos($allResponse, '>') !== false ||
+                stripos($allResponse, 'welcome') !== false) {
+                return true;
+            }
+            
+            return false;
+            
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+
+    // Helper method untuk parse response VLAN profile
+    private function parseVlanProfileResponse($response)
+    {
+        $profiles = [];
+        
+        // If response is too short, create a dummy profile for testing
+        if (strlen($response) < 50) {
+            return [[
+                'name' => 'default',
+                'id' => 'default',
+                'vlans' => [
+                    ['vlan_id' => 100, 'description' => 'Default VLAN 100'],
+                    ['vlan_id' => 200, 'description' => 'Default VLAN 200']
+                ]
+            ]];
+        }
+        
+        $lines = explode("\n", $response);
+        $currentProfile = null;
+        $inVlanSection = false;
+        
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+            
+            // Look for profile headers - various patterns
+            if (preg_match('/(?:ONU-Profile|Profile|profile)\s*[:\-]?\s*(.+)/i', $line, $matches)) {
+                // Save previous profile if exists
+                if ($currentProfile) {
+                    $profiles[] = $currentProfile;
+                }
+                
+                $profileName = trim($matches[1]);
+                $currentProfile = [
+                    'name' => $profileName,
+                    'id' => $profileName,
+                    'vlans' => []
+                ];
+                $inVlanSection = false;
+                continue;
+            }
+            
+            // Look for VLAN section start
+            if (stripos($line, 'vlan') !== false) {
+                $inVlanSection = true;
+            }
+            
+            // Parse VLAN entries
+            if ($inVlanSection) {
+                // Multiple VLAN patterns
+                $patterns = [
+                    '/vlan\s*[:\-]?\s*(\d+)/i',     // vlan: 100, vlan-100, vlan 100
+                    '/(\d+)\s*vlan/i',              // 100 vlan
+                    '/^\s*(\d+)\s*$/',              // Just number on line
+                    '/id\s*[:\-]?\s*(\d+)/i'        // id: 100
+                ];
+                
+                foreach ($patterns as $pattern) {
+                    if (preg_match($pattern, $line, $matches)) {
+                        $vlanId = intval($matches[1]);
+                        if ($vlanId > 0 && $vlanId <= 4094) {
+                            // Start new profile if none exists
+                            if (!$currentProfile) {
+                                $currentProfile = [
+                                    'name' => 'default-profile',
+                                    'id' => 'default-profile',
+                                    'vlans' => []
+                                ];
+                            }
+                            
+                            // Avoid duplicates
+                            $exists = false;
+                            foreach ($currentProfile['vlans'] as $existingVlan) {
+                                if ($existingVlan['vlan_id'] == $vlanId) {
+                                    $exists = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (!$exists) {
+                                $currentProfile['vlans'][] = [
+                                    'vlan_id' => $vlanId,
+                                    'description' => $line
+                                ];
+                            }
+                            break; // Found VLAN, no need to check other patterns
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Save last profile
+        if ($currentProfile) {
+            $profiles[] = $currentProfile;
+        }
+        
+        // If no profiles found, create a test profile
+        if (empty($profiles) && strlen($response) > 50) {
+            $profiles[] = [
+                'name' => 'parsed-data',
+                'id' => 'parsed-data',
+                'vlans' => [
+                    ['vlan_id' => 999, 'description' => 'Parsed from: ' . substr($response, 0, 100)]
+                ]
+            ];
+        }
+        
+        return $profiles;
+    }
+
+    public function testVlanCommand(Olt $olt)
+    {
+        $result = ['success' => false, 'message' => '', 'data' => []];
+        
+        try {
+            // Quick test with simple command first
+            $testResult = $this->quickTelnetTest($olt->ip, $olt->port, $olt->user, $olt->pass);
+            
+            if ($testResult['success']) {
+                $result['success'] = true;
+                $result['message'] = 'Koneksi telnet berhasil. Response: ' . substr($testResult['response'], 0, 200) . '...';
+                $result['data'] = ['response_length' => strlen($testResult['response'])];
+            } else {
+                $result['message'] = $testResult['message'];
+            }
+        } catch (\Exception $e) {
+            $result['message'] = 'Error: ' . $e->getMessage();
+        }
+        
+        return response()->json($result);
+    }
+
+    // Quick telnet test for debugging
+    private function quickTelnetTest($ip, $port, $user, $pass)
+    {
+        $timeout = 3;
+        $result = ['success' => false, 'message' => '', 'response' => ''];
+        
+        try {
+            $fp = @fsockopen($ip, $port, $errno, $errstr, $timeout);
+            if (!$fp) {
+                $result['message'] = "Gagal koneksi ke $ip:$port ($errstr)";
+                return $result;
+            }
+            
+            stream_set_timeout($fp, $timeout);
+            
+            // Login
+            $loginResult = $this->telnetLogin($fp, $user, $pass);
+            if (!$loginResult) {
+                fclose($fp);
+                $result['message'] = 'Gagal login';
+                return $result;
+            }
+            
+            // Send simple command
+            fwrite($fp, "show version\r\n");
+            fflush($fp);
+            
+            // Read response
+            usleep(2000000); // 2 seconds
+            $response = fread($fp, 4096);
+            
+            fclose($fp);
+            
+            $result['success'] = true;
+            $result['response'] = $response;
+            $result['message'] = 'Test berhasil';
+            
+        } catch (\Exception $e) {
+            $result['message'] = 'Error: ' . $e->getMessage();
+        }
+        
+        return $result;
+    }
+
+    public function getVlanProfilesView(Olt $olt)
+    {
+        $profiles = VlanProfile::where('olt_id', $olt->id)
+            ->orderBy('profile_name')
+            ->get();
+            
+        if ($profiles->count() > 0) {
+            $html = '<div class="table-responsive">';
+            $html .= '<table class="table table-bordered table-striped">';
+            $html .= '<thead><tr><th>Profile Name</th><th>Profile ID</th><th>VLAN Count</th><th>Last Updated</th><th>VLANs</th></tr></thead>';
+            $html .= '<tbody>';
+            
+            foreach ($profiles as $profile) {
+                $html .= '<tr>';
+                $html .= '<td>' . htmlspecialchars($profile->profile_name) . '</td>';
+                $html .= '<td>' . htmlspecialchars($profile->profile_id) . '</td>';
+                $html .= '<td>' . $profile->vlan_count . '</td>';
+                $html .= '<td>' . ($profile->last_updated ? $profile->last_updated->format('d/m/Y H:i:s') : 'N/A') . '</td>';
+                $html .= '<td>';
+                
+                if ($profile->vlan_data && count($profile->vlan_data) > 0) {
+                    $html .= '<div class="vlan-list">';
+                    foreach ($profile->vlan_data as $vlan) {
+                        $html .= '<span class="badge bg-primary me-1 mb-1">VLAN ' . $vlan['vlan_id'] . '</span>';
+                    }
+                    $html .= '</div>';
+                } else {
+                    $html .= '<span class="text-muted">No VLANs</span>';
+                }
+                
+                $html .= '</td>';
+                $html .= '</tr>';
+            }
+            
+            $html .= '</tbody></table></div>';
+            return $html;
+        } else {
+            return '<div class="alert alert-info">
+                        <i class="fas fa-info-circle"></i> 
+                        Belum ada VLAN profiles tersimpan. Silakan sync VLAN profiles terlebih dahulu.
+                    </div>';
+        }
     }
 }

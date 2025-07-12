@@ -10,4 +10,9 @@ class Olt extends Model
     protected $fillable = [
         'nama', 'tipe', 'ip', 'port', 'card', 'user', 'pass', 'community_read', 'community_write', 'port_snmp'
     ];
+
+    public function vlanProfiles()
+    {
+        return $this->hasMany(VlanProfile::class);
+    }
 }
