@@ -4,7 +4,14 @@
 <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center">
         <h4 class="mb-0">Daftar OLT</h4>
-        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#modalOlt">Tambah OLT</button>
+        <div class="d-flex gap-2">
+            <a href="{{ route('onus.create') }}" class="btn btn-success">
+                <i class="fas fa-plus"></i> Add ONU
+            </a>
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#modalOlt">
+                <i class="fas fa-server"></i> Tambah OLT
+            </button>
+        </div>
     </div>
     <div class="card-body">
         @if(session('success'))

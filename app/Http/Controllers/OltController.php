@@ -523,11 +523,27 @@ class OltController extends Controller
         $lines = explode("\n", $response);
         $currentProfile = null;
         $inVlanSection = false;
-        
-        foreach ($lines as $line) {
+          foreach ($lines as $line) {
             $line = trim($line);
             if (empty($line)) continue;
             
+            // Look for direct "name: ProfileName" pattern first
+            if (preg_match('/^name\s*[:\-]\s*(.+)/i', $line, $nameMatches)) {
+                // Save previous profile if exists
+                if ($currentProfile) {
+                    $profiles[] = $currentProfile;
+                }
+                
+                $profileName = trim($nameMatches[1]);
+                $currentProfile = [
+                    'name' => $profileName,
+                    'id' => $profileName,
+                    'vlans' => []
+                ];
+                $inVlanSection = false;
+                continue;
+            }
+
             // Look for profile headers - various patterns
             if (preg_match('/(?:ONU-Profile|Profile|profile)\s*[:\-]?\s*(.+)/i', $line, $matches)) {
                 // Save previous profile if exists
@@ -536,6 +552,12 @@ class OltController extends Controller
                 }
                 
                 $profileName = trim($matches[1]);
+                
+                // Remove "name:" prefix if present (fix for the issue)
+                if (preg_match('/^name\s*[:\-]\s*(.+)/i', $profileName, $nameMatches)) {
+                    $profileName = trim($nameMatches[1]);
+                }
+                
                 $currentProfile = [
                     'name' => $profileName,
                     'id' => $profileName,
