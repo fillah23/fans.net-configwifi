@@ -11,8 +11,8 @@
                     <ul class="sub-menu" aria-expanded="false">
                         <li><a href="/olts">Daftar OLT</a></li>
                         <li><a href="/onus">Daftar ONU</a></li>
-                        <li><a href="/onus/add">Add ONU</a></li>
-                        <li><a href="/vlans">VLAN Profile</a></li>
+                        <li><a href="/onus/create">Add ONU</a></li>
+                        
                     </ul>
                 </li>
                 <li>

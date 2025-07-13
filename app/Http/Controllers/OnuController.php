@@ -86,7 +86,7 @@ class OnuController extends Controller
             'port' => 'required|integer', 
             'onu_id' => 'required|integer',
             'name' => 'required|string',
-            'description' => 'required|string',
+            'description' => 'required_if:config_type,wan-ip-pppoe|string',
             'config_type' => 'required|in:wan-ip-pppoe,onu-bridge',
             'pppoe_username' => 'required_if:config_type,wan-ip-pppoe|string',
             'pppoe_password' => 'required_if:config_type,wan-ip-pppoe|string',
@@ -99,6 +99,13 @@ class OnuController extends Controller
         $result = ['success' => false, 'message' => ''];
         
         try {
+            Log::info('ONU Configuration Request', [
+                'config_type' => $validated['config_type'],
+                'olt_id' => $validated['olt_id'],
+                'name' => $validated['name'],
+                'vlan' => $validated['vlan']
+            ]);
+            
             if ($validated['config_type'] === 'wan-ip-pppoe') {
                 $configResult = $this->configureWanIpPppoeOnu($olt, $validated);
             } else {
@@ -112,6 +119,11 @@ class OnuController extends Controller
                 $result['message'] = $configResult['message'];
             }
         } catch (\Exception $e) {
+            Log::error('ONU Configuration Error', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'data' => $validated
+            ]);
             $result['message'] = 'Error: ' . $e->getMessage();
         }
         
@@ -603,11 +615,128 @@ class OnuController extends Controller
         ];
     }
 
-    // Configure ONU Bridge (placeholder for future implementation)
+    // Configure ONU Bridge
     private function configureOnuBridge($olt, $data)
     {
-        $result = ['success' => false, 'message' => 'ONU Bridge configuration not implemented yet'];
+        $result = ['success' => false, 'message' => ''];
+        
+        try {
+            Log::info('Starting ONU Bridge Configuration', [
+                'olt_ip' => $olt->ip,
+                'olt_port' => $olt->port,
+                'onu_data' => [
+                    'sn' => $data['onu_sn'],
+                    'card' => $data['card'],
+                    'port' => $data['port'],
+                    'onu_id' => $data['onu_id'],
+                    'name' => $data['name'],
+                    'vlan' => $data['vlan']
+                ]
+            ]);
+            
+            $fp = @fsockopen($olt->ip, $olt->port, $errno, $errstr, 5);
+            if (!$fp) {
+                $errorMsg = "Gagal koneksi ke {$olt->ip}:{$olt->port} ($errstr)";
+                Log::error('ONU Bridge - Connection Failed', ['error' => $errorMsg]);
+                $result['message'] = $errorMsg;
+                return $result;
+            }
+            
+            stream_set_timeout($fp, 10);
+            
+            // Login process
+            $loginResult = $this->telnetLogin($fp, $olt->user, $olt->pass);
+            if (!$loginResult) {
+                fclose($fp);
+                $errorMsg = 'Gagal login ke OLT';
+                Log::error('ONU Bridge - Login Failed');
+                $result['message'] = $errorMsg;
+                return $result;
+            }
+            
+            Log::info('ONU Bridge - Login Successful, generating commands');
+            
+            // Generate commands for ONU Bridge configuration
+            $commands = $this->generateOnuBridgeCommands($data);
+            
+            Log::info('ONU Bridge - Generated Commands', ['commands_count' => count($commands)]);
+            
+            // Execute commands
+            $commandResponses = [];
+            foreach ($commands as $index => $command) {
+                Log::info("ONU Bridge - Executing command $index", ['command' => $command]);
+                
+                fwrite($fp, $command . "\r\n");
+                fflush($fp);
+                usleep(500000); // 0.5 second delay between commands
+                
+                // Read response to ensure command is processed
+                $response = fread($fp, 4096);
+                $commandResponses[] = ['command' => $command, 'response' => trim($response)];
+            }
+            
+            fclose($fp);
+            
+            Log::info('ONU Bridge - Configuration Complete', [
+                'commands_executed' => count($commands),
+                'sample_responses' => array_slice($commandResponses, 0, 3)
+            ]);
+            
+            $result['success'] = true;
+            $result['message'] = 'ONU Bridge berhasil dikonfigurasi';
+            
+        } catch (\Exception $e) {
+            Log::error('ONU Bridge - Exception', [
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $result['message'] = 'Error: ' . $e->getMessage();
+        }
+        
         return $result;
+    }
+
+    // Generate ONU Bridge configuration commands
+    private function generateOnuBridgeCommands($data)
+    {
+        $sn = $data['onu_sn'];
+        $card = $data['card'];
+        $port = $data['port'];
+        $onuId = $data['onu_id'];
+        $name = $data['name'];
+        $vlan = $data['vlan'];
+        
+        return [
+            'con t',
+            "interface gpon-olt_1/$card/$port",
+            "onu $onuId type ALL-GPON sn $sn",
+            'exit',
+            "interface gpon-onu_1/$card/$port:$onuId",
+            "name $name",
+            'tcont 1 name BRIDGE profile 1000MBPS',
+            'gemport 1 name Bridge tcont 1',
+            'gemport 1 traffic-limit upstream UP1000MBPS downstream DW1000MBPS',
+            "service-port 1 vport 1 user-vlan $vlan vlan $vlan",
+            'port-identification format DSL-FORUM-PON sport 1',
+            'pppoe-intermediate-agent enable sport 1',
+            'exit',
+            "pon-onu-mng gpon-onu_1/$card/$port:$onuId",
+            "service BRIDGE gemport 1 vlan $vlan",
+            'vlan port veip_1 mode hybrid',
+            "vlan port eth_0/1 mode tag vlan $vlan",
+            "vlan port eth_0/2 mode tag vlan $vlan",
+            "vlan port eth_0/3 mode tag vlan $vlan",
+            "vlan port eth_0/4 mode tag vlan $vlan",
+            'dhcp-ip ethuni eth_0/1 from-internet',
+            'dhcp-ip ethuni eth_0/2 from-internet',
+            'dhcp-ip ethuni eth_0/3 from-internet',
+            'dhcp-ip ethuni eth_0/4 from-internet',
+            'security-mgmt 998 state enable mode forward ingress-type lan protocol web https',
+            'end',
+            'wr'
+        ];
     }
 
     // Helper method for telnet login (reused from OltController)
@@ -859,15 +988,16 @@ class OnuController extends Controller
         $olt = Olt::findOrFail($oltId);
         
         $result = ['success' => false, 'message' => '', 'raw_response' => ''];
+        $timeout = 10; // Define timeout value
         
         try {
-            $fp = @fsockopen($olt->ip, $olt->port, $errno, $errstr, 10);
+            $fp = @fsockopen($olt->ip, $olt->port, $errno, $errstr, $timeout);
             if (!$fp) {
                 $result['message'] = "Gagal koneksi ke {$olt->ip}:{$olt->port} ($errstr)";
                 return response()->json($result);
             }
             
-            stream_set_timeout($fp, 10);
+            stream_set_timeout($fp, $timeout);
             
             // Login
             $loginResult = $this->telnetLogin($fp, $olt->user, $olt->pass);

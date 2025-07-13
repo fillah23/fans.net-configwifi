@@ -168,6 +168,27 @@
                                 </div>
                             </div>
 
+                            <!-- ONU Bridge Information (shown when ONU Bridge is selected) -->
+                            <div id="bridge_info" class="bg-info p-3 rounded mb-3" style="display: none;">
+                                <h6 class="text-white mb-3">
+                                    <i class="fas fa-info-circle"></i> ONU Bridge Configuration
+                                </h6>
+                                <div class="text-white">
+                                    <p class="mb-2">
+                                        <i class="fas fa-check-circle"></i> 
+                                        <strong>Bridge Mode:</strong> ONU akan dikonfigurasi dalam mode bridge
+                                    </p>
+                                    <p class="mb-2">
+                                        <i class="fas fa-network-wired"></i> 
+                                        <strong>Ethernet Ports:</strong> Semua port ethernet (eth_0/1 - eth_0/4) akan dikonfigurasi dengan VLAN yang dipilih
+                                    </p>
+                                    <p class="mb-0">
+                                        <i class="fas fa-cog"></i> 
+                                        <strong>Required:</strong> Hanya Name dan VLAN yang perlu diisi untuk konfigurasi ini
+                                    </p>
+                                </div>
+                            </div>
+
                             <!-- VLAN Configuration -->
                             <div class="bg-light p-3 rounded mb-3">
                                 <h6 class="text-primary mb-3">
@@ -214,6 +235,9 @@
                                 <button type="button" class="btn btn-secondary" id="resetForm">
                                     <i class="fas fa-redo"></i> Reset
                                 </button>
+                                <button type="button" class="btn btn-outline-warning btn-sm" id="debugBridgeConfig" style="display: none;">
+                                    <i class="fas fa-bug"></i> Debug Bridge Config
+                                </button>
                             </div>
                         </form>                        
                     </div>
@@ -252,6 +276,26 @@ $(document).ready(function() {
         selectedOnu: selectedOnu,
         getAvailableSlotDisabled: $('#getAvailableSlot').prop('disabled')
     });
+
+    // Set initial config type state on page load
+    const initialConfigType = $('input[name="config_type"]:checked').val();
+    if (initialConfigType === 'wan-ip-pppoe') {
+        $('#pppoe_config').show();
+        $('#bridge_info').hide();
+        $('#debugBridgeConfig').hide();
+        $('input[name="pppoe_username"], input[name="pppoe_password"]').prop('required', true);
+        $('input[name="description"]').prop('required', true);
+    } else if (initialConfigType === 'onu-bridge') {
+        $('#pppoe_config').hide();
+        $('#bridge_info').show();
+        $('#debugBridgeConfig').show();
+        $('input[name="pppoe_username"], input[name="pppoe_password"]').prop('required', false);
+        $('input[name="description"]').prop('required', false);
+        
+        // Clear PPPoE values on initial load if bridge is selected
+        $('input[name="pppoe_username"]').val('');
+        $('input[name="pppoe_password"]').val('');
+    }
 
     // Test Connection
     $('#testConnection').click(function() {
@@ -950,35 +994,194 @@ $(document).ready(function() {
     $('input[name="config_type"]').change(function() {
         if ($(this).val() === 'wan-ip-pppoe') {
             $('#pppoe_config').show();
+            $('#bridge_info').hide();
+            $('#debugBridgeConfig').hide();
             $('input[name="pppoe_username"], input[name="pppoe_password"]').prop('required', true);
-        } else {
+            $('input[name="description"]').prop('required', true);
+        } else if ($(this).val() === 'onu-bridge') {
             $('#pppoe_config').hide();
+            $('#bridge_info').show();
+            $('#debugBridgeConfig').show();
             $('input[name="pppoe_username"], input[name="pppoe_password"]').prop('required', false);
+            $('input[name="description"]').prop('required', false);
+            
+            // Clear PPPoE values to prevent validation issues
+            $('input[name="pppoe_username"]').val('');
+            $('input[name="pppoe_password"]').val('');
         }
+    });
+
+    // Debug Bridge Configuration
+    $('#debugBridgeConfig').click(function() {
+        const formData = $('#onuConfigForm').serializeArray();
+        const formObject = {};
+        formData.forEach(function(item) {
+            formObject[item.name] = item.value;
+        });
+        
+        // Add config_type if not present
+        if (!formObject.config_type) {
+            formObject.config_type = 'onu-bridge';
+        }
+        
+        console.log('Debug Bridge Config - Form Data:', formObject);
+        
+        showLoading('Testing Bridge Configuration...');
+        
+        $.ajax({
+            url: '/debug/onu-bridge',
+            method: 'POST',
+            data: formObject,
+            headers: {
+                'X-CSRF-TOKEN': '{{ csrf_token() }}'
+            },
+            success: function(response) {
+                hideLoading();
+                console.log('Debug Bridge Response:', response);
+                
+                if (response.success) {
+                    let commandsHtml = '<div style="text-align: left; font-size: 12px;">';
+                    commandsHtml += '<h6>Generated Commands:</h6>';
+                    commandsHtml += '<pre style="background: #f8f9fa; padding: 10px; border-radius: 5px; max-height: 400px; overflow-y: auto;">';
+                    commandsHtml += response.commands.join('\n');
+                    commandsHtml += '</pre>';
+                    commandsHtml += '<p><strong>Commands Count:</strong> ' + response.commands_count + '</p>';
+                    commandsHtml += '<p><strong>OLT:</strong> ' + response.olt_info.name + ' (' + response.olt_info.ip + ':' + response.olt_info.port + ')</p>';
+                    commandsHtml += '</div>';
+                    
+                    Swal.fire({
+                        title: 'Debug Bridge Configuration',
+                        html: commandsHtml,
+                        width: 800,
+                        showCloseButton: true
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Debug Failed',
+                        text: response.message,
+                        showCloseButton: true
+                    });
+                }
+            },
+            error: function(xhr, status, error) {
+                hideLoading();
+                console.error('Debug Bridge Error:', error);
+                
+                let errorText = 'Error: ' + error;
+                if (xhr.responseJSON && xhr.responseJSON.message) {
+                    errorText = xhr.responseJSON.message;
+                }
+                
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Debug Error',
+                    text: errorText,
+                    showCloseButton: true
+                });
+            }
+        });
     });
 
     // Submit form
     $('#onuConfigForm').submit(function(e) {
         e.preventDefault();
         
+        // Debug: Log form data before submission
+        const formData = $(this).serializeArray();
+        const formObject = {};
+        formData.forEach(function(item) {
+            formObject[item.name] = item.value;
+        });
+        
+        console.log('Form submission data:', formObject);
+        
+        // Check configuration type and clean data for ONU Bridge
+        if (formObject.config_type === 'onu-bridge') {
+            console.log('ONU Bridge configuration detected');
+            console.log('Required fields for bridge:', {
+                name: formObject.name,
+                vlan: formObject.vlan,
+                vlan_profile: formObject.vlan_profile
+            });
+            
+            // Remove PPPoE fields for ONU Bridge to avoid validation errors
+            delete formObject.pppoe_username;
+            delete formObject.pppoe_password;
+            
+            // Make description optional for bridge
+            if (!formObject.description || formObject.description.trim() === '') {
+                formObject.description = formObject.name; // Use name as description if empty
+            }
+            
+            console.log('Cleaned data for ONU Bridge:', formObject);
+        }
+        
         showLoading('Configuring ONU...');
         
         $.ajax({
             url: '{{ route("onus.store") }}',
             method: 'POST',
-            data: $(this).serialize() + '&_token={{ csrf_token() }}',
+            data: formObject,
+            headers: {
+                'X-CSRF-TOKEN': '{{ csrf_token() }}'
+            },
             success: function(response) {
                 hideLoading();
+                console.log('Server response:', response);
                 if (response.success) {
-                    alert('ONU configured successfully!');
-                    location.reload();
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Success!',
+                        text: response.message,
+                        timer: 3000
+                    }).then(() => {
+                        location.reload();
+                    });
                 } else {
-                    alert('Configuration failed: ' + response.message);
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Configuration Failed',
+                        text: response.message,
+                        showCloseButton: true
+                    });
                 }
             },
-            error: function() {
+            error: function(xhr, status, error) {
                 hideLoading();
-                alert('Error configuring ONU');
+                console.error('AJAX Error:', {
+                    status: xhr.status,
+                    statusText: xhr.statusText,
+                    responseText: xhr.responseText,
+                    error: error
+                });
+                
+                let errorMessage = 'Error configuring ONU';
+                if (xhr.responseJSON && xhr.responseJSON.message) {
+                    errorMessage = xhr.responseJSON.message;
+                } else if (xhr.responseJSON && xhr.responseJSON.errors) {
+                    // Handle validation errors
+                    const errors = xhr.responseJSON.errors;
+                    const errorMessages = [];
+                    for (const field in errors) {
+                        errorMessages.push(`${field}: ${errors[field].join(', ')}`);
+                    }
+                    errorMessage = 'Validation Error:\n' + errorMessages.join('\n');
+                } else if (xhr.responseText) {
+                    try {
+                        const errorResponse = JSON.parse(xhr.responseText);
+                        errorMessage = errorResponse.message || errorMessage;
+                    } catch (e) {
+                        errorMessage = 'Server Error: ' + xhr.status;
+                    }
+                }
+                
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Error',
+                    text: errorMessage,
+                    showCloseButton: true
+                });
             }
         });
     });
