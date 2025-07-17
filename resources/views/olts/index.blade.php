@@ -60,11 +60,7 @@
                                         <i class="fas fa-network-wired"></i> Tes Koneksi
                                     </button>
                                 </li>
-                                {{-- <li>
-                                    <button class="dropdown-item testVlanBtn" data-id="{{ $olt->id }}">
-                                        <i class="fas fa-bug"></i> Test VLAN Command
-                                    </button>
-                                </li> --}}
+                               
                                 <li><hr class="dropdown-divider"></li>
                                 <li>
                                     <button class="dropdown-item syncVlanBtn" data-id="{{ $olt->id }}">
@@ -123,6 +119,7 @@
                 <option value="">Pilih Tipe</option>
                 <option value="ZTE C300">ZTE C300</option>
                 <option value="ZTE C320">ZTE C320</option>
+                <option value="HUAWEI MA5630T">HUAWEI MA5630T</option>
               </select>
             </div>
             <div class="col-md-6 mb-3">
@@ -136,6 +133,10 @@
             <div class="col-md-6 mb-3">
               <label>Card</label>
               <div id="cardCheckboxes">
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="checkbox" name="card[]" value="0" id="card0">
+                  <label class="form-check-label" for="card0">0</label>
+                </div>
                 <div class="form-check form-check-inline">
                   <input class="form-check-input" type="checkbox" name="card[]" value="1" id="card1">
                   <label class="form-check-label" for="card1">1</label>
@@ -354,6 +355,47 @@ $(function() {
                 }).fail(function(xhr) {
                     Swal.close();
                     Swal.fire('Gagal', 'Test command gagal dijalankan', 'error');
+                });
+            }
+        });
+    });
+
+    // Test VLAN Display Command
+    $(document).on('click', '.testVlanDisplayBtn', function() {
+        var id = $(this).data('id');
+        Swal.fire({
+            title: 'Test VLAN Display Command',
+            text: 'Sedang test display vlan all command...',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+                $.get('/olts/' + id + '/test-vlan-display', function(res) {
+                    Swal.close();
+                    var resultHtml = res.message;
+                    if (res.success && res.data) {
+                        resultHtml += '<br><br><strong>Details:</strong>';
+                        resultHtml += '<br>• VLANs Found: ' + (res.data.vlans_found || 0);
+                        resultHtml += '<br>• Response Length: ' + (res.data.response_length || 0) + ' chars';
+                        resultHtml += '<br>• OLT Type: ' + (res.data.olt_type || 'Unknown');
+                        
+                        if (res.data.response_preview) {
+                            resultHtml += '<br><br><strong>Response Preview:</strong>';
+                            resultHtml += '<pre style="text-align: left; max-height: 300px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 5px; font-size: 12px;">';
+                            resultHtml += res.data.response_preview.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                            resultHtml += '</pre>';
+                        }
+                    }
+                    
+                    Swal.fire({
+                        icon: res.success ? 'success' : 'error',
+                        title: res.success ? 'Test VLAN Display Berhasil' : 'Test VLAN Display Gagal',
+                        html: resultHtml,
+                        width: 800,
+                        showCloseButton: true
+                    });
+                }).fail(function(xhr) {
+                    Swal.close();
+                    Swal.fire('Gagal', 'Test VLAN display command gagal dijalankan', 'error');
                 });
             }
         });

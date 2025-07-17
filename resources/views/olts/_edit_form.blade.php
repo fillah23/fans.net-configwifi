@@ -9,6 +9,7 @@
         <select name="tipe" class="form-control" id="editTipeOlt" required>
             <option value="ZTE C300" {{ $olt->tipe == 'ZTE C300' ? 'selected' : '' }}>ZTE C300</option>
             <option value="ZTE C320" {{ $olt->tipe == 'ZTE C320' ? 'selected' : '' }}>ZTE C320</option>
+            <option value="HUAWEI MA5630T" {{ $olt->tipe == 'HUAWEI MA5630T' ? 'selected' : '' }}>HUAWEI MA5630T</option>
         </select>
     </div>
     <div class="col-md-6 mb-3">
@@ -25,7 +26,7 @@
             @php
                 $cards = explode(',', $olt->card);
             @endphp
-            @for($i=1;$i<=18;$i++)
+            @for($i=0;$i<=18;$i++)
                 <div class="form-check form-check-inline">
                     <input class="form-check-input" type="checkbox" name="card[]" value="{{ $i }}" id="editCard{{ $i }}" {{ in_array($i, $cards) ? 'checked' : '' }}>
                     <label class="form-check-label" for="editCard{{ $i }}">{{ $i }}</label>

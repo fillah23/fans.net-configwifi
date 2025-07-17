@@ -32,6 +32,7 @@ Route::middleware('auth')->group(function () {
     Route::get('olts/{olt}/vlan-profiles', [App\Http\Controllers\OltController::class, 'getVlanProfiles'])->name('olts.vlan-profiles');
     Route::get('olts/{olt}/vlan-profiles-view', [App\Http\Controllers\OltController::class, 'getVlanProfilesView'])->name('olts.vlan-profiles-view');
     Route::get('olts/{olt}/test-vlan', [App\Http\Controllers\OltController::class, 'testVlanCommand'])->name('olts.test-vlan');
+    Route::get('olts/{olt}/test-vlan-display', [App\Http\Controllers\OltController::class, 'testVlanDisplay'])->name('olts.test-vlan-display');
     
     // ONU Routes - Custom routes first, then resource routes
     Route::post('onus/get-unconfigured', [App\Http\Controllers\OnuController::class, 'getUnconfiguredOnus'])->name('onus.get-unconfigured');
