@@ -1183,48 +1183,129 @@ interface gpon-olt_1/2/5
         ]);
     }
 
-    // Simulate successful ONU slot calculation for testing
+    // Get available slot using real OLT response instead of simulation
     public function simulateGetAvailableSlot(Request $request)
     {
-        // Simulate your real OLT response
-        $simulatedResponse = "
-OLT-JEMBER-C300#show run interface gpon-olt_1/2/5
-Building configuration...
-interface gpon-olt_1/2/5
-  no shutdown
-  linktrap disable
-  description OLT - 5
-  name OLT - 5
-  onu 1 type ALL sn ZTEGC6748239
-  onu 2 type ZTE sn ZTEGC1E91517
-  onu 5 type ZTE sn ZTEGC0C4B91C
-  onu 7 type ZTE sn ZTEGCFEB50AF
-  onu 8 type ALL sn ZTEGD35932E1
-  onu 9 type ZTE sn ZTEGC880AB09
-  onu 10 type ZTE sn ZTEGC0E51B39
-";
+        $oltId = $request->input('olt_id');
+        $card = $request->input('card', 2);
+        $port = $request->input('port', 5);
         
-        // Use actual parsing method
-        $existingIds = $this->parseExistingOnuIds($simulatedResponse);
-        
-        // Calculate next available ID
-        $nextId = 1;
-        $maxOnuId = 128;
-        
-        while ($nextId <= $maxOnuId && in_array($nextId, $existingIds)) {
-            $nextId++;
+        if (!$oltId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'OLT ID is required'
+            ]);
         }
         
-        $result = [
-            'success' => true,
-            'next_onu_id' => $nextId,
-            'message' => "Next available ONU ID: $nextId (simulated)",
-            'debug_info' => [
+        $olt = Olt::findOrFail($oltId);
+        $timeout = 10;
+        $result = ['success' => false, 'message' => '', 'raw_response' => ''];
+        
+        try {
+            // Connect to real OLT
+            $fp = @fsockopen($olt->ip, $olt->port, $errno, $errstr, $timeout);
+            if (!$fp) {
+                $result['message'] = "Gagal koneksi ke {$olt->ip}:{$olt->port} ($errstr)";
+                return response()->json($result);
+            }
+            
+            stream_set_timeout($fp, $timeout);
+            
+            // Login to OLT
+            $loginResult = $this->telnetLogin($fp, $olt->user, $olt->pass);
+            if (!$loginResult) {
+                fclose($fp);
+                $result['message'] = 'Gagal login ke OLT';
+                return response()->json($result);
+            }
+            
+            // Get real response from show run interface command
+            $command = "show run interface gpon-olt_1/$card/$port";
+            fwrite($fp, "$command\r\n");
+            fflush($fp);
+            
+            // Read response with proper timeout handling
+            $response = '';
+            $maxWait = 20;
+            $waited = 0;
+            $lastDataTime = time();
+            
+            while ($waited < $maxWait) {
+                $data = fread($fp, 4096);
+                if ($data !== false && $data !== '') {
+                    $response .= $data;
+                    $lastDataTime = time();
+                    
+                    // Check if command completed
+                    if (preg_match('/[\#\>]\s*$/', $response)) {
+                        break;
+                    }
+                    
+                    // Handle more prompts
+                    if (strpos($response, 'More:') !== false || strpos($response, '--More--') !== false) {
+                        fwrite($fp, " ");
+                        fflush($fp);
+                    }
+                }
+                
+                if (time() - $lastDataTime > 5) {
+                    break;
+                }
+                
+                usleep(200000);
+                $waited++;
+            }
+            
+            fclose($fp);
+            
+            Log::info('Real OLT Response for simulateGetAvailableSlot', [
+                'olt_ip' => $olt->ip,
+                'command' => $command,
+                'response_length' => strlen($response),
+                'response_preview' => substr($response, 0, 500)
+            ]);
+            
+            // Use actual parsing method with real response
+            $existingIds = $this->parseExistingOnuIds($response);
+            
+            // Calculate next available ID
+            $nextId = 1;
+            $maxOnuId = 128;
+            
+            while ($nextId <= $maxOnuId && in_array($nextId, $existingIds)) {
+                $nextId++;
+            }
+            
+            if ($nextId > $maxOnuId) {
+                $result['success'] = false;
+                $result['message'] = "Tidak ada slot ONU yang tersedia di port gpon-olt_1/$card/$port (maksimal $maxOnuId ONU)";
+            } else {
+                $result['success'] = true;
+                $result['next_onu_id'] = $nextId;
+                $result['message'] = "Next available ONU ID: $nextId (from real OLT response)";
+            }
+            
+            $result['debug_info'] = [
+                'olt_name' => $olt->nama,
+                'olt_ip' => $olt->ip,
+                'command_executed' => $command,
                 'existing_ids' => $existingIds,
-                'response_length' => strlen($simulatedResponse),
-                'simulation' => true
-            ]
-        ];
+                'response_length' => strlen($response),
+                'card' => $card,
+                'port' => $port,
+                'is_real_data' => true
+            ];
+            $result['raw_response'] = $response;
+            
+        } catch (\Exception $e) {
+            Log::error('Error in simulateGetAvailableSlot', [
+                'message' => $e->getMessage(),
+                'olt_id' => $oltId,
+                'card' => $card,
+                'port' => $port
+            ]);
+            $result['message'] = 'Error: ' . $e->getMessage();
+        }
         
         return response()->json($result);
     }

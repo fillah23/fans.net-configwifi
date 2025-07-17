@@ -37,7 +37,7 @@
                             <button type="button" class="btn btn-primary" id="testConnection">
                                 <i class="fas fa-plug"></i> Test Connection
                             </button>
-                            <button type="button" class="btn btn-success" id="getUnconfiguredOnus" disabled>
+                            <button type="button" class="btn btn-success" id="getUnconfiguredOnus">
                                 <i class="fas fa-search"></i> Get Unconfigured ONUs
                             </button>
                             <button type="button" class="btn btn-warning" id="debugUncfgCommand" disabled>

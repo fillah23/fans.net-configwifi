@@ -16,6 +16,8 @@ Route::post('/logout', [AuthController::class, 'logout'])->name('logout')->middl
 // Test routes outside auth middleware for debugging
 Route::get('onus/test-parse-sample', [App\Http\Controllers\OnuController::class, 'testParseWithSampleData'])->name('onus.test-parse-sample');
 Route::get('onus/test-slot-calculation', [App\Http\Controllers\OnuController::class, 'testSlotCalculationWithSample'])->name('onus.test-slot-calculation');
+Route::get('onus/test-configured-sample', [App\Http\Controllers\OnuController::class, 'testConfiguredOnusWithSample'])->name('onus.test-configured-sample');
+Route::get('onus/test-filtered-sample', [App\Http\Controllers\OnuController::class, 'testFilteredOnusWithSample'])->name('onus.test-filtered-sample');
 Route::post('onus/simulate-available-slot', [App\Http\Controllers\OnuController::class, 'simulateGetAvailableSlot'])->name('onus.simulate-available-slot');
 
 Route::middleware('auth')->group(function () {
@@ -33,11 +35,16 @@ Route::middleware('auth')->group(function () {
     
     // ONU Routes - Custom routes first, then resource routes
     Route::post('onus/get-unconfigured', [App\Http\Controllers\OnuController::class, 'getUnconfiguredOnus'])->name('onus.get-unconfigured');
+    Route::post('onus/get-configured', [App\Http\Controllers\OnuFilterController::class, 'getConfiguredOnus'])->name('onus.get-configured');
+    Route::post('onus/get-configured-filtered', [App\Http\Controllers\OnuFilterController::class, 'getConfiguredOnusFiltered'])->name('onus.get-configured-filtered');
+    Route::post('onus/get-onu-by-sn', [App\Http\Controllers\OnuFilterController::class, 'getOnuBySn'])->name('onus.get-onu-by-sn');
+    Route::post('onus/delete-onu', [App\Http\Controllers\OnuFilterController::class, 'deleteOnu'])->name('onus.delete-onu');
     Route::post('onus/get-available-slot', [App\Http\Controllers\OnuController::class, 'getAvailableSlot'])->name('onus.get-available-slot');
     Route::get('onus/get-vlan-profiles', [App\Http\Controllers\OnuController::class, 'getVlanProfiles'])->name('onus.get-vlan-profiles');
     Route::post('onus/test-configuration', [App\Http\Controllers\OnuController::class, 'testConfiguration'])->name('onus.test-configuration');
     Route::post('onus/debug-uncfg', [App\Http\Controllers\OnuController::class, 'debugUncfgCommand'])->name('onus.debug-uncfg');
     Route::post('onus/debug-show-run', [App\Http\Controllers\OnuController::class, 'debugShowRunInterface'])->name('onus.debug-show-run');
+    Route::post('onus/debug-real-olt', [App\Http\Controllers\OnuController::class, 'debugRealOltConnection'])->name('onus.debug-real-olt');
     Route::resource('onus', App\Http\Controllers\OnuController::class);
     
     Route::get('/settings', [SettingController::class, 'index'])->name('settings.index');
