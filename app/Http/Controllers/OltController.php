@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 use App\Models\Olt;
 use App\Models\VlanProfile;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class OltController extends Controller
 {
@@ -567,30 +569,44 @@ class OltController extends Controller
         $result = ['success' => false, 'message' => '', 'data' => []];
         
         try {
-            $vlanData = $this->getVlanProfilesViaTelnet($olt->ip, $olt->port, $olt->user, $olt->pass, $olt->tipe);
-            
-            if ($vlanData['success']) {
-                // Clear existing VLAN profiles for this OLT
-                VlanProfile::where('olt_id', $olt->id)->delete();
+            // Check if OLT type contains HUAWEI
+            if (stripos($olt->tipe, 'HUAWEI') !== false) {
+                $syncResult = $this->syncHuaweiVlanProfiles($olt->ip, $olt->port, $olt->user, $olt->pass, $olt->id);
                 
-                $savedProfiles = 0;
-                foreach ($vlanData['profiles'] as $profile) {
-                    VlanProfile::create([
-                        'olt_id' => $olt->id,
-                        'profile_name' => $profile['name'],
-                        'profile_id' => $profile['id'],
-                        'vlan_data' => $profile['vlans'],
-                        'vlan_count' => count($profile['vlans']),
-                        'last_updated' => now(),
-                    ]);
-                    $savedProfiles++;
+                if ($syncResult['success']) {
+                    $result['success'] = true;
+                    $result['message'] = 'HUAWEI VLAN profiles berhasil disinkronisasi';
+                    $result['data'] = $syncResult['data'];
+                } else {
+                    $result['message'] = 'Gagal sync HUAWEI VLAN profiles: ' . $syncResult['message'];
                 }
-                
-                $result['success'] = true;
-                $result['message'] = "Berhasil menyimpan {$savedProfiles} VLAN profile";
-                $result['data'] = ['profiles_count' => $savedProfiles];
             } else {
-                $result['message'] = $vlanData['message'];
+                // For non-HUAWEI OLT (existing logic)
+                $vlanData = $this->getVlanProfilesViaTelnet($olt->ip, $olt->port, $olt->user, $olt->pass, $olt->tipe);
+                
+                if ($vlanData['success']) {
+                    // Clear existing VLAN profiles for this OLT
+                    VlanProfile::where('olt_id', $olt->id)->delete();
+                    
+                    $savedProfiles = 0;
+                    foreach ($vlanData['profiles'] as $profile) {
+                        VlanProfile::create([
+                            'olt_id' => $olt->id,
+                            'profile_name' => $profile['name'],
+                            'profile_id' => $profile['id'],
+                            'vlan_data' => $profile['vlans'],
+                            'vlan_count' => count($profile['vlans']),
+                            'last_updated' => now(),
+                        ]);
+                        $savedProfiles++;
+                    }
+                    
+                    $result['success'] = true;
+                    $result['message'] = "Berhasil menyimpan {$savedProfiles} VLAN profile";
+                    $result['data'] = ['profiles_count' => $savedProfiles];
+                } else {
+                    $result['message'] = $vlanData['message'];
+                }
             }
         } catch (\Exception $e) {
             $result['message'] = 'Error: ' . $e->getMessage();
@@ -633,6 +649,14 @@ class OltController extends Controller
                 fclose($fp);
                 $result['message'] = 'Gagal login ke OLT ' . $oltType;
                 return $result;
+            }
+            
+            // Send enable command for HUAWEI before other commands
+            if (strtoupper($oltType) === 'HUAWEI MA5630T') {
+                fwrite($fp, "enable\r\n");
+                fflush($fp);
+                usleep(1000000); // Wait for enable to process
+                $enableResp = fread($fp, 4096);
             }
             
             // Send appropriate command based on OLT type
@@ -1127,6 +1151,12 @@ class OltController extends Controller
             
             // Send appropriate test command based on OLT type
             if (strtoupper($oltType) === 'HUAWEI MA5630T') {
+                // Send enable first for HUAWEI
+                fwrite($fp, "enable\r\n");
+                fflush($fp);
+                usleep(1000000); // Wait for enable
+                $enableResp = fread($fp, 4096);
+                
                 fwrite($fp, "display vlan all\r\n");
                 fflush($fp);
                 usleep(1500000); // 1.5 seconds wait for HUAWEI to process
@@ -1155,31 +1185,76 @@ class OltController extends Controller
     public function getVlanProfilesView(Olt $olt)
     {
         $profiles = VlanProfile::where('olt_id', $olt->id)
+            ->orderBy('profile_type')
             ->orderBy('profile_name')
             ->get();
             
         if ($profiles->count() > 0) {
             $html = '<div class="table-responsive">';
             $html .= '<table class="table table-bordered table-striped">';
-            $html .= '<thead><tr><th>Profile Name</th><th>Profile ID</th><th>VLAN Count</th><th>Last Updated</th><th>VLANs</th></tr></thead>';
+            $html .= '<thead><tr><th>Type</th><th>Profile Name</th><th>Profile ID</th><th>Count/Info</th><th>Last Updated</th><th>Details</th></tr></thead>';
             $html .= '<tbody>';
             
             foreach ($profiles as $profile) {
                 $html .= '<tr>';
-                $html .= '<td>' . htmlspecialchars($profile->profile_name) . '</td>';
+                
+                // Profile Type with badge
+                $typeColor = match($profile->profile_type ?? 'vlan') {
+                    'vlan' => 'bg-primary',
+                    'line_profile' => 'bg-success', 
+                    'service_profile' => 'bg-warning'
+                };
+                $html .= '<td><span class="badge ' . $typeColor . '">' . ucfirst(str_replace('_', ' ', $profile->profile_type ?? 'vlan')) . '</span></td>';
+                
+                // Clean profile name for display (remove TYPE suffix)
+                $displayName = preg_replace('/_TYPE_(vlan|line_profile|service_profile)$/', '', $profile->profile_name);
+                $html .= '<td>' . htmlspecialchars($displayName) . '</td>';
                 $html .= '<td>' . htmlspecialchars($profile->profile_id) . '</td>';
-                $html .= '<td>' . $profile->vlan_count . '</td>';
+                
+                // Count/Info column based on type
+                if ($profile->profile_type === 'vlan') {
+                    $html .= '<td>' . $profile->vlan_count . ' VLANs</td>';
+                } else {
+                    $data = $profile->vlan_data;
+                    if (is_array($data) && isset($data['binding_times'])) {
+                        $html .= '<td>' . $data['binding_times'] . ' bindings</td>';
+                    } else {
+                        $html .= '<td>-</td>';
+                    }
+                }
+                
                 $html .= '<td>' . ($profile->last_updated ? $profile->last_updated->format('d/m/Y H:i:s') : 'N/A') . '</td>';
                 $html .= '<td>';
                 
-                if ($profile->vlan_data && count($profile->vlan_data) > 0) {
+                // Details column based on type
+                if ($profile->profile_type === 'vlan' && $profile->vlan_data && count($profile->vlan_data) > 0) {
                     $html .= '<div class="vlan-list">';
                     foreach ($profile->vlan_data as $vlan) {
-                        $html .= '<span class="badge bg-primary me-1 mb-1">VLAN ' . $vlan['vlan_id'] . '</span>';
+                        if (isset($vlan['vlan_id'])) {
+                            $html .= '<span class="badge bg-primary me-1 mb-1">VLAN ' . $vlan['vlan_id'] . '</span>';
+                        } else {
+                            // For HUAWEI VLAN format
+                            $html .= '<span class="badge bg-primary me-1 mb-1">VLAN ' . ($vlan['id'] ?? 'N/A') . '</span>';
+                        }
                     }
                     $html .= '</div>';
+                } elseif (in_array($profile->profile_type, ['line_profile', 'service_profile']) && $profile->vlan_data) {
+                    $data = $profile->vlan_data;
+                    if (is_array($data)) {
+                        $html .= '<small>';
+                        if (isset($data['binding_times'])) {
+                            $html .= 'Bindings: ' . $data['binding_times'];
+                        }
+                        if (isset($data['type'])) {
+                            $html .= '<br>Type: ' . $data['type'];
+                        }
+                        if (isset($data['attribute'])) {
+                            $html .= '<br>Attribute: ' . $data['attribute'];
+                        }
+                        $html .= '</small>';
+                    }
                 } else {
-                    $html .= '<span class="text-muted">No VLANs</span>';
+                    $html .= '<span class="text-muted">No details</span>';
                 }
                 
                 $html .= '</td>';
@@ -1187,6 +1262,22 @@ class OltController extends Controller
             }
             
             $html .= '</tbody></table></div>';
+            
+            // Add summary for HUAWEI
+            if (stripos($olt->tipe, 'HUAWEI') !== false) {
+                $vlanCount = $profiles->where('profile_type', 'vlan')->count();
+                $lineCount = $profiles->where('profile_type', 'line_profile')->count();
+                $serviceCount = $profiles->where('profile_type', 'service_profile')->count();
+                
+                $html .= '<div class="mt-3">';
+                $html .= '<h6>Summary:</h6>';
+                $html .= '<div class="row">';
+                $html .= '<div class="col-md-4"><span class="badge bg-primary">' . $vlanCount . '</span> VLANs</div>';
+                $html .= '<div class="col-md-4"><span class="badge bg-success">' . $lineCount . '</span> Line Profiles</div>';
+                $html .= '<div class="col-md-4"><span class="badge bg-warning">' . $serviceCount . '</span> Service Profiles</div>';
+                $html .= '</div></div>';
+            }
+            
             return $html;
         } else {
             return '<div class="alert alert-info">
@@ -1222,5 +1313,669 @@ class OltController extends Controller
         }
         
         return 'N/A';
+    }
+
+    // Helper method untuk sync HUAWEI VLAN profiles dengan 3 perintah
+    private function syncHuaweiVlanProfiles($ip, $port, $user, $pass, $oltId)
+    {
+        $timeout = 10; // Increased timeout for HUAWEI
+        $result = ['success' => false, 'message' => '', 'data' => []];
+        
+        try {
+            $fp = @fsockopen($ip, $port, $errno, $errstr, $timeout);
+            if (!$fp) {
+                $result['message'] = "Gagal koneksi ke $ip:$port ($errstr)";
+                return $result;
+            }
+            
+            stream_set_timeout($fp, $timeout);
+            
+            // Login to HUAWEI OLT
+            if (!$this->huaweiTelnetLoginSimple($fp, $user, $pass)) {
+                fclose($fp);
+                $result['message'] = 'Login gagal ke HUAWEI OLT';
+                return $result;
+            }
+            
+            // Send enable command first for HUAWEI
+            fwrite($fp, "enable\r\n");
+            fflush($fp);
+            usleep(1000000); // Wait 1 second for enable to process
+            $enableResponse = fread($fp, 4096);
+            
+            // Log enable response for debugging
+            Log::info("HUAWEI Enable Response: " . $enableResponse);
+            
+            // Try to enter system view for some commands that might need it
+            fwrite($fp, "system-view\r\n");
+            fflush($fp);
+            usleep(500000); // Wait 0.5 seconds
+            $systemViewResponse = fread($fp, 4096);
+            Log::info("HUAWEI System View Response: " . $systemViewResponse);
+            
+            // Return to user view 
+            fwrite($fp, "quit\r\n");
+            fflush($fp);
+            usleep(500000);
+            $quitResponse = fread($fp, 4096);
+            
+            // Array untuk menyimpan hasil dari 3 perintah
+            $commands = [
+                'display vlan all',
+                'display ont-lineprofile gpon all', 
+                'display ont-srvprofile gpon all'
+            ];
+            
+            $commandResults = [];
+            $allData = [];
+            
+            foreach ($commands as $index => $command) {
+                // Log command being executed
+                Log::info("=== HUAWEI Command Execution ===");
+                Log::info("Command Index: $index");
+                Log::info("Command: $command");
+                Log::info("OLT IP: $ip");
+                Log::info("Timestamp: " . date('Y-m-d H:i:s'));
+                Log::info("Sending command to telnet session...");
+                
+                // Send command
+                fwrite($fp, "$command\r\n");
+                fflush($fp);
+                Log::info("Command sent, waiting for response...");
+                
+                // Wait and read response
+                usleep(2000000); // 2 seconds for HUAWEI to process
+                Log::info("Reading response from telnet...");
+                $response = $this->readTelnetResponse($fp, $timeout, 'HUAWEI MA5630T');
+                Log::info("Response received, length: " . strlen($response) . " characters");
+                
+                // Log detailed response information
+                Log::info("=== Command Response Details ===");
+                Log::info("Response Length: " . strlen($response));
+                Log::info("Response Preview (first 500 chars): " . substr($response, 0, 500));
+                Log::info("Response Preview (last 500 chars): " . substr($response, -500));
+                
+                // Log the RAW TERMINAL OUTPUT with proper formatting
+                Log::info("=== RAW TERMINAL OUTPUT START ===");
+                Log::info("Command: $command");
+                Log::info("Raw Output:");
+                Log::info($response);
+                Log::info("=== RAW TERMINAL OUTPUT END ===");
+                
+                // Log formatted output for better readability
+                Log::info("=== FORMATTED OUTPUT START ===");
+                $lines = explode("\n", $response);
+                foreach ($lines as $lineNum => $line) {
+                    Log::info("Line " . ($lineNum + 1) . ": " . trim($line));
+                }
+                Log::info("=== FORMATTED OUTPUT END ===");
+                
+                Log::info("Response contains 'VLAN': " . (stripos($response, 'VLAN') !== false ? 'YES' : 'NO'));
+                Log::info("Response contains 'Profile': " . (stripos($response, 'Profile') !== false ? 'YES' : 'NO'));
+                Log::info("Response contains 'Error': " . (stripos($response, 'Error') !== false ? 'YES' : 'NO'));
+                Log::info("Response contains 'Total:': " . (stripos($response, 'Total:') !== false ? 'YES' : 'NO'));
+                Log::info("=== End Command Response ===");
+                
+                
+                
+                // Create readable terminal output log
+                $readableOutput = $this->formatTerminalOutput($command, $response);
+                Log::info("=== READABLE TERMINAL OUTPUT ===");
+                Log::info($readableOutput);
+                Log::info("=== END READABLE OUTPUT ===");
+                
+                // Save terminal output to file for easier viewing
+                $this->saveTerminalOutputToFile($command, $response, $ip, $index);
+                
+                // Detect and format table output specifically
+                if (stripos($command, 'display vlan all') !== false) {
+                    $this->logVlanTableFormat($response);
+                } elseif (stripos($command, 'display ont-lineprofile') !== false) {
+                    $this->logLineProfileTableFormat($response);
+                } elseif (stripos($command, 'display ont-srvprofile') !== false) {
+                    $this->logServiceProfileTableFormat($response);
+                }
+                
+                // Log command and response for debugging
+                Log::info("=== HUAWEI Command Summary ===");
+                Log::info("HUAWEI Command: $command");
+                Log::info("HUAWEI Response Length: " . strlen($response));
+                Log::info("HUAWEI Response Preview: " . substr($response, 0, 300));
+                Log::info("HUAWEI Response Full (for analysis): " . $response); // Full response for debugging
+                
+                // Log line count and character analysis
+                $lines = explode("\n", $response);
+                Log::info("HUAWEI Response Line Count: " . count($lines));
+                Log::info("HUAWEI Response First 5 Lines: " . implode(" | ", array_slice($lines, 0, 5)));
+                Log::info("HUAWEI Response Last 5 Lines: " . implode(" | ", array_slice($lines, -5)));
+                
+                // Log specific patterns found
+                $vlanMatches = preg_match_all('/VLAN\s*(\d+)/i', $response, $vlanMatchesArray);
+                $profileMatches = preg_match_all('/Profile.*?(\d+)/i', $response, $profileMatchesArray);
+                Log::info("HUAWEI VLAN patterns found: $vlanMatches");
+                Log::info("HUAWEI Profile patterns found: $profileMatches");
+                if ($vlanMatches > 0) {
+                    Log::info("HUAWEI VLAN IDs found: " . implode(", ", array_slice($vlanMatchesArray[1], 0, 10)));
+                }
+                Log::info("=== End Command Summary ===");
+                
+                $commandResults[$index] = [
+                    'command' => $command,
+                    'response' => $response,
+                    'length' => strlen($response)
+                ];
+                
+                // Parse based on command type
+                if ($index === 0) {
+                    // Parse VLAN data from 'display vlan all'
+                    Log::info("=== PARSING VLAN DATA (Command 0) ===");
+                    $vlans = $this->parseHuaweiVlanData($response);
+                    $allData['vlans'] = $vlans;
+                    Log::info("HUAWEI Command 0 (VLAN): Parsed " . count($vlans) . " VLANs");
+                    if (!empty($vlans)) {
+                        Log::info("HUAWEI Sample VLANs: " . json_encode(array_slice($vlans, 0, 3)));
+                    } else {
+                        Log::warning("HUAWEI WARNING: No VLANs parsed from response");
+                    }
+                    Log::info("=== END VLAN PARSING ===");
+                } elseif ($index === 1) {
+                    // Parse line profiles from 'display ont-lineprofile gpon all'
+                    Log::info("=== PARSING LINE PROFILES (Command 1) ===");
+                    $lineProfiles = $this->parseHuaweiLineProfiles($response);
+                    $allData['line_profiles'] = $lineProfiles;
+                    Log::info("HUAWEI Command 1 (Line Profiles): Parsed " . count($lineProfiles) . " profiles");
+                    if (!empty($lineProfiles)) {
+                        Log::info("HUAWEI Sample Line Profiles: " . json_encode(array_slice($lineProfiles, 0, 3)));
+                    } else {
+                        Log::warning("HUAWEI WARNING: No Line Profiles parsed from response");
+                    }
+                    Log::info("=== END LINE PROFILE PARSING ===");
+                } elseif ($index === 2) {
+                    // Parse service profiles from 'display ont-srvprofile gpon all'
+                    Log::info("=== PARSING SERVICE PROFILES (Command 2) ===");
+                    $srvProfiles = $this->parseHuaweiSrvProfiles($response);
+                    $allData['service_profiles'] = $srvProfiles;
+                    Log::info("HUAWEI Command 2 (Service Profiles): Parsed " . count($srvProfiles) . " profiles");
+                    if (!empty($srvProfiles)) {
+                        Log::info("HUAWEI Sample Service Profiles: " . json_encode(array_slice($srvProfiles, 0, 3)));
+                    } else {
+                        Log::warning("HUAWEI WARNING: No Service Profiles parsed from response");
+                    }
+                    Log::info("=== END SERVICE PROFILE PARSING ===");
+                }
+            }
+            
+            // Log final summary of all commands
+            Log::info("=== HUAWEI SYNC COMMAND SUMMARY ===");
+            Log::info("Total commands executed: " . count($commands));
+            Log::info("Total VLANs found: " . count($allData['vlans'] ?? []));
+            Log::info("Total Line Profiles found: " . count($allData['line_profiles'] ?? []));
+            Log::info("Total Service Profiles found: " . count($allData['service_profiles'] ?? []));
+            foreach ($commandResults as $idx => $cmdResult) {
+                Log::info("Command $idx ('{$cmdResult['command']}'): {$cmdResult['length']} chars response");
+            }
+            Log::info("=== END SYNC SUMMARY ===");
+            
+            fclose($fp);
+            
+            // Clear existing VLAN profiles for this OLT using transaction for data consistency
+            DB::transaction(function() use ($oltId) {
+                VlanProfile::where('olt_id', $oltId)->delete();
+            });
+            
+            $savedProfiles = 0;
+            
+            // Save VLAN data with duplicate handling
+            if (!empty($allData['vlans'])) {
+                foreach ($allData['vlans'] as $vlan) {
+                    try {
+                        $vlanProfile = VlanProfile::updateOrCreate(
+                            [
+                                'olt_id' => $oltId,
+                                'profile_name' => 'VLAN_' . $vlan['id'] . '_TYPE_vlan'
+                            ],
+                            [
+                                'profile_id' => $vlan['id'],
+                                'vlan_data' => $vlan,
+                                'vlan_count' => 1,
+                                'profile_type' => 'vlan',
+                                'last_updated' => now(),
+                            ]
+                        );
+                        $savedProfiles++;
+                        Log::info("HUAWEI VLAN Saved: " . $vlanProfile->profile_name);
+                    } catch (\Exception $e) {
+                        Log::error("HUAWEI VLAN Save Error: " . $e->getMessage());
+                    }
+                }
+            }
+            
+            // Save line profiles with duplicate handling
+            if (!empty($allData['line_profiles'])) {
+                foreach ($allData['line_profiles'] as $profile) {
+                    try {
+                        $lineProfile = VlanProfile::updateOrCreate(
+                            [
+                                'olt_id' => $oltId,
+                                'profile_name' => $profile['name'] . '_TYPE_line_profile'
+                            ],
+                            [
+                                'profile_id' => $profile['id'],
+                                'vlan_data' => $profile,
+                                'vlan_count' => 0,
+                                'profile_type' => 'line_profile',
+                                'last_updated' => now(),
+                            ]
+                        );
+                        $savedProfiles++;
+                        Log::info("HUAWEI Line Profile Saved: " . $lineProfile->profile_name);
+                    } catch (\Exception $e) {
+                        Log::error("HUAWEI Line Profile Save Error: " . $e->getMessage());
+                    }
+                }
+            }
+            
+            // Save service profiles with duplicate handling
+            if (!empty($allData['service_profiles'])) {
+                foreach ($allData['service_profiles'] as $profile) {
+                    try {
+                        $serviceProfile = VlanProfile::updateOrCreate(
+                            [
+                                'olt_id' => $oltId,
+                                'profile_name' => $profile['name'] . '_TYPE_service_profile'
+                            ],
+                            [
+                                'profile_id' => $profile['id'],
+                                'vlan_data' => $profile,
+                                'vlan_count' => 0,
+                                'profile_type' => 'service_profile',
+                                'last_updated' => now(),
+                            ]
+                        );
+                        $savedProfiles++;
+                        Log::info("HUAWEI Service Profile Saved: " . $serviceProfile->profile_name);
+                    } catch (\Exception $e) {
+                        Log::error("HUAWEI Service Profile Save Error: " . $e->getMessage());
+                    }
+                }
+            }
+            
+            $result['success'] = true;
+            $result['message'] = "Berhasil sync {$savedProfiles} profiles dari HUAWEI OLT";
+            $result['data'] = [
+                'profiles_count' => $savedProfiles,
+                'vlans_count' => count($allData['vlans'] ?? []),
+                'line_profiles_count' => count($allData['line_profiles'] ?? []),
+                'service_profiles_count' => count($allData['service_profiles'] ?? []),
+                'command_results' => $commandResults,
+                'enable_response' => substr($enableResponse ?? '', 0, 100), // First 100 chars of enable response
+                'debug_info' => [
+                    'total_vlans_parsed' => count($allData['vlans'] ?? []),
+                    'total_line_profiles_parsed' => count($allData['line_profiles'] ?? []),
+                    'total_service_profiles_parsed' => count($allData['service_profiles'] ?? []),
+                    'vlan_response_length' => $commandResults[0]['length'] ?? 0,
+                    'line_profile_response_length' => $commandResults[1]['length'] ?? 0,
+                    'service_profile_response_length' => $commandResults[2]['length'] ?? 0,
+                    'vlan_sample_data' => array_slice($allData['vlans'] ?? [], 0, 3),
+                    'line_profile_sample_data' => array_slice($allData['line_profiles'] ?? [], 0, 3),
+                    'service_profile_sample_data' => array_slice($allData['service_profiles'] ?? [], 0, 3)
+                ]
+            ];
+            
+        } catch (\Exception $e) {
+            $result['message'] = 'Error: ' . $e->getMessage();
+        }
+        
+        return $result;
+    }
+    
+    // Helper method untuk parse VLAN data dari HUAWEI 'display vlan all'
+    private function parseHuaweiVlanData($response)
+    {
+        $vlans = [];
+        $lines = explode("\n", $response);
+        
+        Log::info("HUAWEI VLAN Parsing - Total lines: " . count($lines));
+        
+        foreach ($lines as $lineNum => $line) {
+            $line = trim($line);
+            
+            Log::debug("HUAWEI VLAN Line $lineNum: '$line'");
+            
+            // Skip header lines and empty lines
+            if (empty($line) || 
+                stripos($line, 'VLAN') === 0 && stripos($line, 'Type') !== false ||
+                stripos($line, '---') !== false ||
+                stripos($line, 'Total:') !== false ||
+                stripos($line, 'Command:') !== false ||
+                stripos($line, 'Error:') !== false ||
+                stripos($line, 'Invalid') !== false) {
+                continue;
+            }
+            
+            // Parse VLAN line format: VLAN_ID Type Attribute STND-Port_NUM SERV-Port_NUM VLAN-Con_NUM
+            // Example: "     1   smart     common                 4               0             -"
+            if (preg_match('/^\s*(\d+)\s+(\w+)\s+(\w+)\s+(\d+)\s+(\d+)\s+(.*)$/', $line, $matches)) {
+                $vlans[] = [
+                    'id' => $matches[1],
+                    'type' => $matches[2],
+                    'attribute' => $matches[3],
+                    'stnd_port_num' => $matches[4],
+                    'serv_port_num' => $matches[5],
+                    'vlan_con_num' => trim($matches[6])
+                ];
+                Log::info("HUAWEI VLAN Found: VLAN " . $matches[1]);
+            }
+            // More flexible pattern - just number at start of line
+            elseif (preg_match('/^\s*(\d+)\s+(.*)$/', $line, $matches)) {
+                $vlanId = $matches[1];
+                if ($vlanId > 0 && $vlanId <= 4094 && strlen(trim($matches[2])) > 0) {
+                    $vlans[] = [
+                        'id' => $vlanId,
+                        'type' => 'parsed',
+                        'attribute' => 'common',
+                        'stnd_port_num' => '0',
+                        'serv_port_num' => '0',
+                        'vlan_con_num' => '-',
+                        'raw_line' => $line
+                    ];
+                    Log::info("HUAWEI VLAN Found (flexible): VLAN $vlanId");
+                }
+            }
+        }
+        
+        Log::info("HUAWEI VLAN Parsing - Total VLANs found: " . count($vlans));
+        return $vlans;
+    }
+    
+    // Helper method untuk parse line profiles dari HUAWEI
+    private function parseHuaweiLineProfiles($response)
+    {
+        $profiles = [];
+        $lines = explode("\n", $response);
+        
+        Log::info("HUAWEI Line Profile Parsing - Total lines: " . count($lines));
+        
+        foreach ($lines as $lineNum => $line) {
+            $line = trim($line);
+            
+            Log::debug("HUAWEI Line Profile Line $lineNum: '$line'");
+            
+            // Skip header lines and empty lines
+            if (empty($line) || 
+                stripos($line, 'Profile-ID') !== false ||
+                stripos($line, '---') !== false ||
+                stripos($line, 'Total:') !== false ||
+                stripos($line, 'Command:') !== false) {
+                continue;
+            }
+            
+            // Parse line profile format: Profile-ID Profile-name Binding_times
+            // Example: "  1           SMARTOLT_FLEXIBLE_GPON                      7"
+            if (preg_match('/^\s*(\d+)\s+(.+?)\s+(\d+)\s*$/', $line, $matches)) {
+                $profiles[] = [
+                    'id' => $matches[1],
+                    'name' => trim($matches[2]),
+                    'binding_times' => $matches[3]
+                ];
+                Log::info("HUAWEI Line Profile Found: ID " . $matches[1] . " - " . trim($matches[2]));
+            }
+            // Alternative pattern for profiles without binding times
+            elseif (preg_match('/^\s*(\d+)\s+(.+)$/', $line, $matches)) {
+                $profileName = trim($matches[2]);
+                // Make sure it's not just numbers
+                if (!is_numeric($profileName) && strlen($profileName) > 1) {
+                    $profiles[] = [
+                        'id' => $matches[1],
+                        'name' => $profileName,
+                        'binding_times' => '0'
+                    ];
+                    Log::info("HUAWEI Line Profile Found (no binding): ID " . $matches[1] . " - " . $profileName);
+                }
+            }
+        }
+        
+        Log::info("HUAWEI Line Profile Parsing - Total profiles found: " . count($profiles));
+        return $profiles;
+    }
+    
+    // Helper method untuk parse service profiles dari HUAWEI
+    private function parseHuaweiSrvProfiles($response)
+    {
+        $profiles = [];
+        $lines = explode("\n", $response);
+        
+        foreach ($lines as $line) {
+            $line = trim($line);
+            
+            // Skip header lines and empty lines
+            if (empty($line) || 
+                stripos($line, 'Profile-ID') !== false ||
+                stripos($line, '---') !== false ||
+                stripos($line, 'Total:') !== false) {
+                continue;
+            }
+            
+            // Parse service profile format: Profile-ID Profile-name Binding_times  
+            // Example: "  1           HG8245                                      2"
+            if (preg_match('/^\s*(\d+)\s+(.+?)\s+(\d+)\s*$/', $line, $matches)) {
+                $profiles[] = [
+                    'id' => $matches[1],
+                    'name' => trim($matches[2]),
+                    'binding_times' => $matches[3]
+                ];
+            }
+            // Alternative pattern for profiles without binding times
+            elseif (preg_match('/^\s*(\d+)\s+(.+)$/', $line, $matches)) {
+                $profiles[] = [
+                    'id' => $matches[1],
+                    'name' => trim($matches[2]),
+                    'binding_times' => '0'
+                ];
+            }
+        }
+        
+        return $profiles;
+    }
+    
+    // Helper method untuk log format tabel VLAN
+    private function logVlanTableFormat($response)
+    {
+        Log::info("=== VLAN TABLE ANALYSIS ===");
+        $lines = explode("\n", $response);
+        
+        $tableStarted = false;
+        $headerFound = false;
+        $vlanEntries = [];
+        
+        foreach ($lines as $lineNum => $line) {
+            $trimmedLine = trim($line);
+            
+            // Look for table header
+            if (stripos($trimmedLine, 'VLAN') !== false && stripos($trimmedLine, 'Type') !== false) {
+                $headerFound = true;
+                Log::info("VLAN Table Header Found at Line " . ($lineNum + 1) . ": $trimmedLine");
+                continue;
+            }
+            
+            // Look for separator line
+            if (preg_match('/^[\-\s]+$/', $trimmedLine) && strlen($trimmedLine) > 10) {
+                if ($headerFound) {
+                    $tableStarted = true;
+                    Log::info("VLAN Table Separator Found at Line " . ($lineNum + 1));
+                }
+                continue;
+            }
+            
+            // Parse VLAN entries
+            if ($tableStarted && preg_match('/^\s*(\d+)\s+(\w+)\s+(\w+)\s+(\d+)\s+(\d+)\s+(.*)$/', $trimmedLine, $matches)) {
+                $vlanEntry = [
+                    'vlan_id' => $matches[1],
+                    'type' => $matches[2],
+                    'attribute' => $matches[3],
+                    'stnd_port' => $matches[4],
+                    'serv_port' => $matches[5],
+                    'vlan_con' => trim($matches[6])
+                ];
+                $vlanEntries[] = $vlanEntry;
+                Log::info("VLAN Entry Found: VLAN {$vlanEntry['vlan_id']} | Type: {$vlanEntry['type']} | Attr: {$vlanEntry['attribute']} | STND: {$vlanEntry['stnd_port']} | SERV: {$vlanEntry['serv_port']} | CON: {$vlanEntry['vlan_con']}");
+            }
+            
+            // Look for total line
+            if (stripos($trimmedLine, 'Total:') !== false) {
+                Log::info("VLAN Table Total Found at Line " . ($lineNum + 1) . ": $trimmedLine");
+                break;
+            }
+        }
+        
+        Log::info("VLAN Table Analysis Complete: " . count($vlanEntries) . " VLAN entries found");
+        if (!empty($vlanEntries)) {
+            Log::info("First VLAN: " . json_encode($vlanEntries[0]));
+            Log::info("Last VLAN: " . json_encode(end($vlanEntries)));
+        }
+        Log::info("=== END VLAN TABLE ANALYSIS ===");
+    }
+    
+    // Helper method untuk log format tabel Line Profile
+    private function logLineProfileTableFormat($response)
+    {
+        Log::info("=== LINE PROFILE TABLE ANALYSIS ===");
+        $lines = explode("\n", $response);
+        
+        $profileEntries = [];
+        foreach ($lines as $lineNum => $line) {
+            $trimmedLine = trim($line);
+            
+            // Look for profile entries
+            if (preg_match('/^\s*(\d+)\s+(.+?)\s+(\d+)\s*$/', $trimmedLine, $matches)) {
+                $profileEntry = [
+                    'profile_id' => $matches[1],
+                    'profile_name' => trim($matches[2]),
+                    'binding_times' => $matches[3]
+                ];
+                $profileEntries[] = $profileEntry;
+                Log::info("Line Profile Found: ID {$profileEntry['profile_id']} | Name: {$profileEntry['profile_name']} | Bindings: {$profileEntry['binding_times']}");
+            }
+        }
+        
+        Log::info("Line Profile Analysis Complete: " . count($profileEntries) . " profiles found");
+        Log::info("=== END LINE PROFILE TABLE ANALYSIS ===");
+    }
+    
+    // Helper method untuk log format tabel Service Profile
+    private function logServiceProfileTableFormat($response)
+    {
+        Log::info("=== SERVICE PROFILE TABLE ANALYSIS ===");
+        $lines = explode("\n", $response);
+        
+        $profileEntries = [];
+        foreach ($lines as $lineNum => $line) {
+            $trimmedLine = trim($line);
+            
+            // Look for profile entries
+            if (preg_match('/^\s*(\d+)\s+(.+?)\s+(\d+)\s*$/', $trimmedLine, $matches)) {
+                $profileEntry = [
+                    'profile_id' => $matches[1],
+                    'profile_name' => trim($matches[2]),
+                    'binding_times' => $matches[3]
+                ];
+                $profileEntries[] = $profileEntry;
+                Log::info("Service Profile Found: ID {$profileEntry['profile_id']} | Name: {$profileEntry['profile_name']} | Bindings: {$profileEntry['binding_times']}");
+            }
+        }
+        
+        Log::info("Service Profile Analysis Complete: " . count($profileEntries) . " profiles found");
+        Log::info("=== END SERVICE PROFILE TABLE ANALYSIS ===");
+    }
+
+    // Helper method untuk menyimpan output terminal ke file
+    private function saveTerminalOutputToFile($command, $response, $ip, $index)
+    {
+        try {
+            $filename = 'huawei_terminal_output_' . str_replace('.', '_', $ip) . '_cmd' . $index . '_' . date('Y-m-d_H-i-s') . '.txt';
+            $filepath = storage_path('app/' . $filename);
+            
+            $content = "==============================================\n";
+            $content .= "HUAWEI OLT Terminal Output\n";
+            $content .= "==============================================\n";
+            $content .= "OLT IP: $ip\n";
+            $content .= "Command: $command\n";
+            $content .= "Command Index: $index\n";
+            $content .= "Timestamp: " . date('Y-m-d H:i:s') . "\n";
+            $content .= "Response Length: " . strlen($response) . " characters\n";
+            $content .= "==============================================\n\n";
+            $content .= "RAW OUTPUT:\n";
+            $content .= "----------------------------------------------\n";
+            $content .= $response;
+            $content .= "\n----------------------------------------------\n\n";
+            
+            // Add formatted output
+            $content .= "FORMATTED OUTPUT (line by line):\n";
+            $content .= "----------------------------------------------\n";
+            $lines = explode("\n", $response);
+            foreach ($lines as $lineNum => $line) {
+                $content .= sprintf("Line %03d: %s\n", $lineNum + 1, $line);
+            }
+            $content .= "----------------------------------------------\n";
+            $content .= "Total Lines: " . count($lines) . "\n";
+            $content .= "==============================================\n";
+            
+            file_put_contents($filepath, $content);
+            error_log("Terminal output saved to: $filepath");
+            
+        } catch (\Exception $e) {
+            error_log("Failed to save terminal output to file: " . $e->getMessage());
+        }
+    }
+
+    // Helper method untuk format terminal output agar lebih readable
+    private function formatTerminalOutput($command, $response)
+    {
+        $output = "\n";
+        $output .= "===============================================\n";
+        $output .= "# $command\n";
+        $output .= "===============================================\n";
+        
+        if (empty(trim($response))) {
+            $output .= "[NO OUTPUT RECEIVED]\n";
+            return $output;
+        }
+        
+        $lines = explode("\n", $response);
+        $cleanLines = [];
+        
+        foreach ($lines as $line) {
+            $cleanLine = trim($line);
+            // Skip completely empty lines, but keep lines with dashes or spaces that are part of table formatting
+            if ($cleanLine !== '' || (strlen($line) > 0 && preg_match('/[\-\s]/', $line))) {
+                $cleanLines[] = $line;
+            }
+        }
+        
+        // Add the cleaned output
+        foreach ($cleanLines as $line) {
+            $output .= $line . "\n";
+        }
+        
+        $output .= "===============================================\n";
+        $output .= "Total lines: " . count($cleanLines) . "\n";
+        $output .= "===============================================\n";
+        
+        return $output;
+    }
+
+    // Test method untuk debug HUAWEI sync (bisa dipanggil manual untuk testing)
+    public function testHuaweiSync(Olt $olt)
+    {
+        if (stripos($olt->tipe, 'HUAWEI') === false) {
+            return response()->json([
+                'success' => false,
+                'message' => 'OLT ini bukan tipe HUAWEI'
+            ]);
+        }
+        
+        $result = $this->syncHuaweiVlanProfiles($olt->ip, $olt->port, $olt->user, $olt->pass, $olt->id);
+        
+        return response()->json($result);
     }
 }

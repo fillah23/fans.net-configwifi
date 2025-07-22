@@ -12,6 +12,7 @@ class VlanProfile extends Model
         'profile_id',
         'vlan_data',
         'vlan_count',
+        'profile_type',
         'last_updated',
     ];
 

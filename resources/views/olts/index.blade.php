@@ -67,6 +67,13 @@
                                         <i class="fas fa-sync-alt"></i> Sync VLAN Profiles
                                     </button>
                                 </li>
+                                @if(stripos($olt->tipe, 'HUAWEI') !== false)
+                                <li>
+                                    <button class="dropdown-item testHuaweiSyncBtn" data-id="{{ $olt->id }}">
+                                        <i class="fas fa-flask"></i> Test HUAWEI Sync
+                                    </button>
+                                </li>
+                                @endif
                                 <li>
                                     <button class="dropdown-item viewVlanBtn" data-id="{{ $olt->id }}" data-bs-toggle="modal" data-bs-target="#modalVlanProfiles">
                                         <i class="fas fa-list"></i> Lihat VLAN Profiles
@@ -417,11 +424,28 @@ $(function() {
                     _token: '{{ csrf_token() }}'
                 }, function(res) {
                     Swal.close();
+                    
+                    var resultHtml = res.message;
+                    if (res.success && res.data) {
+                        resultHtml += '<br><br><strong>Details:</strong>';
+                        resultHtml += '<br>• Total Profiles: ' + (res.data.profiles_count || 0);
+                        if (res.data.vlans_count !== undefined) {
+                            resultHtml += '<br>• VLANs: ' + res.data.vlans_count;
+                        }
+                        if (res.data.line_profiles_count !== undefined) {
+                            resultHtml += '<br>• Line Profiles: ' + res.data.line_profiles_count;
+                        }
+                        if (res.data.service_profiles_count !== undefined) {
+                            resultHtml += '<br>• Service Profiles: ' + res.data.service_profiles_count;
+                        }
+                    }
+                    
                     Swal.fire({
                         icon: res.success ? 'success' : 'error',
                         title: res.success ? 'Berhasil' : 'Gagal',
-                        html: res.message,
-                        timer: res.success ? 3000 : null
+                        html: resultHtml,
+                        timer: res.success ? 4000 : null,
+                        width: 600
                     });
                 }).fail(function(xhr, status, error) {
                     Swal.close();
@@ -434,6 +458,69 @@ $(function() {
                 
                 // Set timeout 30 detik
                 xhr.timeout = 30000;
+            }
+        });
+    });
+
+    // Test HUAWEI Sync (for debugging)
+    $(document).on('click', '.testHuaweiSyncBtn', function() {
+        var id = $(this).data('id');
+        Swal.fire({
+            title: 'Test HUAWEI Sync',
+            text: 'Sedang test sync HUAWEI VLAN profiles...',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+                $.get('/olts/' + id + '/test-huawei-sync', function(res) {
+                    Swal.close();
+                    
+                    var resultHtml = res.message;
+                    if (res.success && res.data) {
+                        resultHtml += '<br><br><strong>Test Results:</strong>';
+                        resultHtml += '<br>• Total Profiles: ' + (res.data.profiles_count || 0);
+                        if (res.data.vlans_count !== undefined) {
+                            resultHtml += '<br>• VLANs Found: ' + res.data.vlans_count;
+                        }
+                        if (res.data.line_profiles_count !== undefined) {
+                            resultHtml += '<br>• Line Profiles: ' + res.data.line_profiles_count;
+                        }
+                        if (res.data.service_profiles_count !== undefined) {
+                            resultHtml += '<br>• Service Profiles: ' + res.data.service_profiles_count;
+                        }
+                        
+                        if (res.data.command_results) {
+                            resultHtml += '<br><br><strong>Commands Executed:</strong>';
+                            res.data.command_results.forEach(function(cmd, index) {
+                                resultHtml += '<br>• ' + cmd.command + ' (Response: ' + cmd.length + ' chars)';
+                            });
+                        }
+                        
+                        if (res.data.debug_info) {
+                            resultHtml += '<br><br><strong>Debug Info:</strong>';
+                            resultHtml += '<br>• VLAN Response Length: ' + (res.data.debug_info.vlan_response_length || 0) + ' chars';
+                            resultHtml += '<br>• Line Profile Response Length: ' + (res.data.debug_info.line_profile_response_length || 0) + ' chars';
+                            resultHtml += '<br>• Service Profile Response Length: ' + (res.data.debug_info.service_profile_response_length || 0) + ' chars';
+                            
+                            if (res.data.debug_info.vlan_sample_data && res.data.debug_info.vlan_sample_data.length > 0) {
+                                resultHtml += '<br>• Sample VLAN: ' + JSON.stringify(res.data.debug_info.vlan_sample_data[0]);
+                            }
+                            if (res.data.debug_info.line_profile_sample_data && res.data.debug_info.line_profile_sample_data.length > 0) {
+                                resultHtml += '<br>• Sample Line Profile: ' + JSON.stringify(res.data.debug_info.line_profile_sample_data[0]);
+                            }
+                        }
+                    }
+                    
+                    Swal.fire({
+                        icon: res.success ? 'success' : 'error',
+                        title: res.success ? 'Test Berhasil' : 'Test Gagal',
+                        html: resultHtml,
+                        width: 800,
+                        showCloseButton: true
+                    });
+                }).fail(function(xhr) {
+                    Swal.close();
+                    Swal.fire('Gagal', 'Test HUAWEI sync gagal dijalankan', 'error');
+                });
             }
         });
     });
